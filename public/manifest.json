@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "N% English",
+  "description": "Webページ内の日本語文章の一部だけを英語へ置き換えます。",
+  "version": "0.1.0",
+  "minimum_chrome_version": "140",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["https://api.openai.com/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "このページの英語表示を切り替える"
+  },
+  "options_page": "options.html"
+}
