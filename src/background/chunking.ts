@@ -1,10 +1,18 @@
-import type { TranslationInputItem, TranslationPayload } from "../shared/types";
+import {
+  canAvoidAdjacentSelection,
+  characterTargetTolerance,
+  selectClosestCharacterPlan,
+  totalSourceCharacters,
+} from "../shared/selection";
+import type { TranslationPayload, TranslationPromptItem } from "../shared/types";
 import { ExtensionError } from "./errors";
 import { createResponsesRequestBody } from "./openai";
 
 export interface TranslationChunk {
-  items: TranslationInputItem[];
-  targetCount: number;
+  items: TranslationPromptItem[];
+  targetCharacters: number;
+  maxCharacterDeviation: number;
+  avoidAdjacent: boolean;
 }
 
 export interface ChunkLimits {
@@ -18,7 +26,8 @@ export interface ChunkLimits {
 export interface ChunkPayloadContext {
   pageTitle: string;
   pageUrl: string;
-  targetCount: number;
+  targetCharacters: number;
+  avoidAdjacent: boolean;
 }
 
 const DEFAULT_LIMITS: ChunkLimits = {
@@ -30,21 +39,25 @@ const DEFAULT_LIMITS: ChunkLimits = {
 const textEncoder = new TextEncoder();
 
 function asPayload(
-  items: TranslationInputItem[],
+  items: TranslationPromptItem[],
   context: ChunkPayloadContext,
 ): TranslationPayload {
   return {
     page_title: context.pageTitle,
     page_url: context.pageUrl,
-    // The page-level value is conservative: a real chunk allocation never has
-    // more digits and request-size differences are otherwise item-driven.
-    target_count: context.targetCount,
+    // Page-level values are conservative: chunk values never need more digits
+    // and request-size differences are otherwise item-driven.
+    target_characters: context.targetCharacters,
+    // Deliberately wider than any real deviation budget so byte estimation is
+    // conservative even when the actual number has more digits than target.
+    max_character_deviation: Number.MAX_SAFE_INTEGER,
+    avoid_adjacent: context.avoidAdjacent,
     items,
   };
 }
 
 export function estimateResponsesRequestBytes(
-  items: TranslationInputItem[],
+  items: TranslationPromptItem[],
   context: ChunkPayloadContext,
 ): number {
   const body = createResponsesRequestBody(asPayload(items, context));
@@ -52,10 +65,10 @@ export function estimateResponsesRequestBytes(
 }
 
 export function splitIntoChunks(
-  items: TranslationInputItem[],
+  items: TranslationPromptItem[],
   context: ChunkPayloadContext,
   limits: ChunkLimits = DEFAULT_LIMITS,
-): TranslationInputItem[][] {
+): TranslationPromptItem[][] {
   if (
     !Number.isInteger(limits.maxItems) ||
     limits.maxItems < 1 ||
@@ -67,8 +80,8 @@ export function splitIntoChunks(
     throw new Error("Chunk limits are invalid");
   }
 
-  const chunks: TranslationInputItem[][] = [];
-  let current: TranslationInputItem[] = [];
+  const chunks: TranslationPromptItem[][] = [];
+  let current: TranslationPromptItem[] = [];
 
   for (const item of items) {
     const singleRequestBytes = estimateResponsesRequestBytes([item], context);
@@ -101,43 +114,134 @@ export function splitIntoChunks(
   return chunks;
 }
 
-export function allocateTargetCounts(
-  chunks: TranslationInputItem[][],
-  targetCount: number,
+export function allocateTargetCharacters(
+  chunks: TranslationPromptItem[][],
+  targetCharacters: number,
+  avoidAdjacent: boolean,
 ): TranslationChunk[] {
-  const totalItems = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  if (targetCount < 0 || targetCount > totalItems) {
-    throw new Error("Target count must fit within the available items");
+  const totalCharacters = chunks.reduce(
+    (sum, chunk) => sum + totalSourceCharacters(chunk),
+    0,
+  );
+  if (targetCharacters < 0) {
+    throw new Error("Target characters must not be negative");
   }
-  if (totalItems === 0 || targetCount === 0) {
-    return chunks.map((items) => ({ items, targetCount: 0 }));
+  if (totalCharacters === 0 || targetCharacters === 0) {
+    return chunks.map((items) => ({
+      items,
+      targetCharacters: 0,
+      maxCharacterDeviation: 0,
+      avoidAdjacent: false,
+    }));
   }
 
-  // Rounding cumulative quotas keeps the exact page-level total while
-  // distributing equal remainders across the page instead of front-loading
-  // them into the earliest chunks.
-  let cumulativeItems = 0;
-  let allocatedTargets = 0;
+  const plan = selectClosestCharacterPlan(
+    chunks.flat(),
+    targetCharacters,
+    avoidAdjacent,
+  );
+  const selectedIds = new Set(plan.map((item) => item.id));
+
   return chunks.map((items) => {
-    cumulativeItems += items.length;
-    const cumulativeTarget = Math.round(
-      (targetCount * cumulativeItems) / totalItems,
+    const chunkTarget = items.reduce(
+      (sum, item) =>
+        sum + (selectedIds.has(item.id) ? item.character_count : 0),
+      0,
     );
-    const chunkTarget = cumulativeTarget - allocatedTargets;
-    allocatedTargets = cumulativeTarget;
-    return { items, targetCount: chunkTarget };
+    return {
+      items,
+      targetCharacters: chunkTarget,
+      maxCharacterDeviation: 0,
+      avoidAdjacent: avoidAdjacent && chunkTarget > 0,
+    };
   });
 }
 
+function addBoundaryGaps(
+  chunks: TranslationPromptItem[][],
+  selectedIds: ReadonlySet<string>,
+): TranslationPromptItem[][] {
+  const excludedIds = new Set<string>();
+  for (let index = 0; index < chunks.length - 1; index += 1) {
+    const left = chunks[index].at(-1);
+    const right = chunks[index + 1][0];
+    if (!left || !right || right.position !== left.position + 1) {
+      continue;
+    }
+    excludedIds.add(selectedIds.has(left.id) ? right.id : left.id);
+  }
+
+  return chunks
+    .map((chunk) => chunk.filter((item) => !excludedIds.has(item.id)))
+    .filter((chunk) => chunk.length > 0);
+}
+
 export function createTranslationChunks(
-  items: TranslationInputItem[],
-  targetCount: number,
-  context: Omit<ChunkPayloadContext, "targetCount">,
+  items: TranslationPromptItem[],
+  targetCharacters: number,
+  context: Omit<ChunkPayloadContext, "targetCharacters" | "avoidAdjacent">,
   limits?: ChunkLimits,
 ): TranslationChunk[] {
-  const completeContext = { ...context, targetCount };
-  return allocateTargetCounts(
-    splitIntoChunks(items, completeContext, limits),
-    targetCount,
+  const pageAvoidAdjacent = canAvoidAdjacentSelection(items, targetCharacters);
+  const completeContext = {
+    ...context,
+    targetCharacters,
+    avoidAdjacent: pageAvoidAdjacent,
+  };
+  const initialChunks = splitIntoChunks(items, completeContext, limits);
+
+  // Independent API calls cannot coordinate their boundary choices. Leaving
+  // one candidate as a gap prevents the last selection in one chunk from being
+  // adjacent to the first selection in the next chunk.
+  const initialPlan = selectClosestCharacterPlan(
+    initialChunks.flat(),
+    targetCharacters,
+    pageAvoidAdjacent,
   );
+  const chunks = pageAvoidAdjacent
+    ? addBoundaryGaps(
+        initialChunks,
+        new Set(initialPlan.map((item) => item.id)),
+      )
+    : initialChunks;
+
+  const allocatedChunks = allocateTargetCharacters(
+    chunks,
+    targetCharacters,
+    pageAvoidAdjacent,
+  );
+  const allocatedCharacters = allocatedChunks.reduce(
+    (sum, chunk) => sum + chunk.targetCharacters,
+    0,
+  );
+  const pageTolerance = characterTargetTolerance(
+    items,
+    targetCharacters,
+    pageAvoidAdjacent,
+  );
+  const distributableDeviation = Math.max(
+    0,
+    pageTolerance - Math.abs(allocatedCharacters - targetCharacters),
+  );
+  const activeCharacters = allocatedChunks.reduce(
+    (sum, chunk) =>
+      sum +
+      (chunk.targetCharacters > 0 ? totalSourceCharacters(chunk.items) : 0),
+    0,
+  );
+  let cumulativeCharacters = 0;
+  let allocatedDeviation = 0;
+
+  return allocatedChunks.map((chunk) => {
+    if (chunk.targetCharacters === 0 || activeCharacters === 0) {
+      return chunk;
+    }
+    cumulativeCharacters += totalSourceCharacters(chunk.items);
+    const cumulativeDeviation = Math.round(
+      (distributableDeviation * cumulativeCharacters) / activeCharacters,
+    );
+    const maxCharacterDeviation = cumulativeDeviation - allocatedDeviation;
+    allocatedDeviation = cumulativeDeviation;
+    return { ...chunk, maxCharacterDeviation };
+  });
 }

@@ -6,8 +6,16 @@ import { TRANSLATION_INSTRUCTIONS } from "../src/shared/constants";
 const payload = {
   page_title: "記事",
   page_url: "https://example.com/article",
-  target_count: 1,
-  items: [{ id: "sentence-0001", text: "これは文章です。", section_heading: "見出し" }],
+  target_characters: 8,
+  max_character_deviation: 0,
+  avoid_adjacent: true,
+  items: [{
+    id: "sentence-0001",
+    text: "これは文章です。",
+    section_heading: "見出し",
+    position: 0,
+    character_count: 8,
+  }],
 };
 
 function apiResponse(outputText: string): Response {
@@ -85,6 +93,43 @@ describe("Responses API client", () => {
     await expect(
       requestTranslations("secret-key", payload, { fetchImpl: fetchMock }),
     ).resolves.toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries when the model selects adjacent sentences", async () => {
+    const spacedPayload = {
+      ...payload,
+      target_characters: 16,
+      items: [0, 1, 2].map((position) => ({
+        id: `sentence-000${position + 1}`,
+        text: "これは文章です。",
+        section_heading: "見出し",
+        position,
+        character_count: 8,
+      })),
+    };
+    const fetchMock = vi
+      .fn(async () => apiResponse(""))
+      .mockResolvedValueOnce(
+        apiResponse(JSON.stringify({
+          translations: [
+            { id: "sentence-0001", english: "One." },
+            { id: "sentence-0002", english: "Two." },
+          ],
+        })),
+      )
+      .mockResolvedValueOnce(
+        apiResponse(JSON.stringify({
+          translations: [
+            { id: "sentence-0001", english: "One." },
+            { id: "sentence-0003", english: "Three." },
+          ],
+        })),
+      );
+
+    await expect(
+      requestTranslations("secret-key", spacedPayload, { fetchImpl: fetchMock }),
+    ).resolves.toHaveLength(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 

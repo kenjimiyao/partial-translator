@@ -3,10 +3,14 @@ import {
   MODEL_NAME,
   TRANSLATION_INSTRUCTIONS,
 } from "../shared/constants";
+import {
+  characterTargetTolerance,
+  totalSourceCharacters,
+} from "../shared/selection";
 import type {
   Translation,
-  TranslationInputItem,
   TranslationPayload,
+  TranslationPromptItem,
 } from "../shared/types";
 import { ExtensionError } from "./errors";
 
@@ -52,18 +56,20 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 export function validateTranslations(
   value: unknown,
-  inputItems: TranslationInputItem[],
-  targetCount: number,
+  inputItems: TranslationPromptItem[],
+  targetCharacters: number,
+  avoidAdjacent: boolean,
+  maxCharacterDeviation?: number,
 ): Translation[] {
   if (!isPlainObject(value) || !Array.isArray(value.translations)) {
     throw new ExtensionError("INVALID_RESPONSE", "OpenAI APIから不正なレスポンスを受信しました。");
   }
 
-  if (value.translations.length !== targetCount) {
+  if (targetCharacters > 0 && value.translations.length === 0) {
     throw new ExtensionError("INVALID_RESPONSE", "OpenAI APIの翻訳件数が正しくありません。");
   }
 
-  const allowedIds = new Set(inputItems.map((item) => item.id));
+  const itemById = new Map(inputItems.map((item) => [item.id, item]));
   const seenIds = new Set<string>();
   const translations: Translation[] = [];
 
@@ -75,7 +81,7 @@ export function validateTranslations(
     ) {
       throw new ExtensionError("INVALID_RESPONSE", "OpenAI APIから不正なレスポンスを受信しました。");
     }
-    if (!allowedIds.has(candidate.id) || seenIds.has(candidate.id)) {
+    if (!itemById.has(candidate.id) || seenIds.has(candidate.id)) {
       throw new ExtensionError("INVALID_RESPONSE", "OpenAI APIの翻訳IDが正しくありません。");
     }
     if (candidate.english.trim().length === 0) {
@@ -84,6 +90,38 @@ export function validateTranslations(
 
     seenIds.add(candidate.id);
     translations.push({ id: candidate.id, english: candidate.english.trim() });
+  }
+
+  const selectedItems = translations.map((translation) => itemById.get(translation.id)!);
+  const selectedCharacters = totalSourceCharacters(selectedItems);
+  const availableCharacters = totalSourceCharacters(inputItems);
+  const tolerance = maxCharacterDeviation ?? characterTargetTolerance(
+    inputItems,
+    targetCharacters,
+    avoidAdjacent,
+  );
+  if (
+    (targetCharacters >= availableCharacters && selectedCharacters !== availableCharacters) ||
+    Math.abs(selectedCharacters - targetCharacters) > tolerance
+  ) {
+    throw new ExtensionError(
+      "INVALID_RESPONSE",
+      "OpenAI APIの翻訳文字数が指定割合から外れています。",
+    );
+  }
+
+  if (avoidAdjacent) {
+    const selectedPositions = new Set(selectedItems.map((item) => item.position));
+    if (
+      [...selectedPositions].some(
+        (position) => selectedPositions.has(position + 1),
+      )
+    ) {
+      throw new ExtensionError(
+        "INVALID_RESPONSE",
+        "OpenAI APIが連続する文章を選択しました。",
+      );
+    }
   }
 
   return translations;
@@ -222,7 +260,13 @@ export async function requestTranslations(
       const rawResponse = await fetchOnce(apiKey, payload, options);
       const outputText = extractOutputText(rawResponse);
       const parsed = JSON.parse(outputText) as unknown;
-      return validateTranslations(parsed, payload.items, payload.target_count);
+      return validateTranslations(
+        parsed,
+        payload.items,
+        payload.target_characters,
+        payload.avoid_adjacent,
+        payload.max_character_deviation,
+      );
     } catch (error) {
       const isValidationFailure =
         error instanceof SyntaxError ||

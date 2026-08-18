@@ -1,25 +1,27 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  allocateTargetCounts,
+  allocateTargetCharacters,
   createTranslationChunks,
   estimateResponsesRequestBytes,
   splitIntoChunks,
   type ChunkLimits,
 } from "../src/background/chunking";
+import { addSelectionMetadata } from "../src/shared/selection";
 
 const context = {
   pageTitle: "記事タイトル",
   pageUrl: "https://example.com/article",
-  targetCount: 3,
+  targetCharacters: 30,
+  avoidAdjacent: true,
 };
 
 function makeItems(count: number) {
-  return Array.from({ length: count }, (_, index) => ({
+  return addSelectionMetadata(Array.from({ length: count }, (_, index) => ({
     id: `sentence-${index}`,
     text: `文章${index}です。`,
     section_heading: "",
-  }));
+  })));
 }
 
 function limits(overrides: Partial<ChunkLimits>): ChunkLimits {
@@ -32,29 +34,82 @@ function limits(overrides: Partial<ChunkLimits>): ChunkLimits {
 }
 
 describe("translation chunking", () => {
-  it("keeps sentences whole and preserves page order", () => {
+  it("keeps sentences whole and leaves safe gaps at request boundaries", () => {
     const chunks = createTranslationChunks(
       makeItems(7),
-      3,
+      14,
       context,
       limits({ maxItems: 3 }),
     );
-    expect(chunks.flatMap((chunk) => chunk.items.map((item) => item.id))).toEqual(
-      makeItems(7).map((item) => item.id),
-    );
+    expect(chunks.flatMap((chunk) => chunk.items.map((item) => item.id))).toEqual([
+      "sentence-0",
+      "sentence-1",
+      "sentence-3",
+      "sentence-4",
+      "sentence-5",
+    ]);
   });
 
-  it("allocates the exact total and spreads equal remainder quotas", () => {
+  it("allocates the exact character total and spreads active chunks", () => {
     const itemChunks = makeItems(4).map((item) => [item]);
-    const chunks = allocateTargetCounts(itemChunks, 2);
+    const chunks = allocateTargetCharacters(itemChunks, 10, true);
 
-    expect(chunks.map((chunk) => chunk.targetCount)).toEqual([1, 0, 1, 0]);
-    expect(chunks.reduce((sum, chunk) => sum + chunk.targetCount, 0)).toBe(2);
-    expect(chunks.every((chunk) => chunk.targetCount <= chunk.items.length)).toBe(true);
+    expect(chunks.map((chunk) => chunk.targetCharacters)).toEqual([0, 6, 0, 6]);
+    expect(chunks.reduce((sum, chunk) => sum + chunk.targetCharacters, 0)).toBe(12);
+  });
+
+  it("does not force one sentence from every chunk at very low rates", () => {
+    const itemChunks = makeItems(10).map((item) => [item]);
+    const chunks = allocateTargetCharacters(itemChunks, 1, true);
+
+    expect(chunks.filter((chunk) => chunk.targetCharacters > 0)).toHaveLength(1);
+    expect(chunks.reduce((sum, chunk) => sum + chunk.targetCharacters, 0)).toBe(6);
+  });
+
+  it("allocates a page-optimal sentence instead of proportional chunk quotas", () => {
+    const candidates = addSelectionMetadata(
+      [60, 100, 60, 60].map((length, index) => ({
+        id: `sentence-${index}`,
+        text: "文".repeat(length),
+        section_heading: "",
+      })),
+    );
+    const chunks = createTranslationChunks(
+      candidates,
+      100,
+      context,
+      limits({ maxItems: 2 }),
+    );
+
+    expect(chunks.flatMap((chunk) => chunk.items.map((item) => item.id))).toContain(
+      "sentence-1",
+    );
+    expect(chunks.map((chunk) => chunk.targetCharacters)).toEqual([100, 0]);
+  });
+
+  it("shares one page-level deviation budget across active chunks", () => {
+    const candidates = addSelectionMetadata(
+      Array.from({ length: 8 }, (_, index) => ({
+        id: `sentence-${index}`,
+        text: "文".repeat(10),
+        section_heading: "",
+      })),
+    );
+    const chunks = createTranslationChunks(
+      candidates,
+      20,
+      context,
+      limits({ maxItems: 2 }),
+    );
+
+    expect(chunks.reduce(
+      (sum, chunk) => sum + chunk.maxCharacterDeviation,
+      0,
+    )).toBe(2);
   });
 
   it("uses the complete UTF-8 encoded request body for the soft limit", () => {
-    const items = [
+    const items = addSelectionMetadata([
       {
         id: "sentence-0001-with-a-long-id",
         text: `日本語と絵文字😀${'"\\'.repeat(40)}`,
@@ -65,7 +120,7 @@ describe("translation chunking", () => {
         text: `次の日本語😀${'"\\'.repeat(40)}`,
         section_heading: "別の見出し",
       },
-    ];
+    ]);
     const oneItemBytes = estimateResponsesRequestBytes([items[0]], context);
     const bothItemsBytes = estimateResponsesRequestBytes(items, context);
     expect(bothItemsBytes).toBeGreaterThan(oneItemBytes);
@@ -89,11 +144,11 @@ describe("translation chunking", () => {
   });
 
   it("keeps one oversized sentence whole when it is below the hard limit", () => {
-    const item = {
+    const [item] = addSelectionMetadata([{
       id: "sentence-0001",
       text: "非常に長い文章です。".repeat(200),
       section_heading: "",
-    };
+    }]);
     const requestBytes = estimateResponsesRequestBytes([item], context);
 
     const chunks = splitIntoChunks(
@@ -110,11 +165,11 @@ describe("translation chunking", () => {
   });
 
   it("fails closed before fetch for a single request above the hard limit", () => {
-    const item = {
+    const [item] = addSelectionMetadata([{
       id: "sentence-0001",
       text: "長すぎる文章です。".repeat(100),
       section_heading: "",
-    };
+    }]);
     const requestBytes = estimateResponsesRequestBytes([item], context);
 
     expect(() =>

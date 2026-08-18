@@ -314,6 +314,11 @@ export class TranslationController {
         "success",
       );
     } catch (error) {
+      console.error("[N% English] Translation failed", {
+        error,
+        pageUrl: requestPageUrl,
+        candidateCount: candidates.length,
+      });
       this.mode = "idle";
       this.session = undefined;
       await this.setStatus("error");
@@ -337,7 +342,11 @@ export class TranslationController {
           type: "SET_TAB_STATUS",
           status,
         });
-      } catch {
+      } catch (error) {
+        console.error("[N% English] Failed to update the tab status", {
+          error,
+          status,
+        });
         // A navigation can tear down the service worker connection. Status is best effort.
       }
     });
@@ -364,6 +373,7 @@ export class TranslationController {
   private async reportClickedRestoreConflict(
     interactionVersion: number,
   ): Promise<void> {
+    console.error("[N% English] Could not restore the clicked translation because the page changed");
     await this.setStatus("error");
     if (this.interactionVersion === interactionVersion) {
       this.toast.show(

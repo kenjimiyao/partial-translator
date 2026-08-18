@@ -85,9 +85,30 @@ function translateMessage(count = 2) {
 }
 
 function successfulResponse(payload: TranslationPayload, prefix = "English"): Response {
-  const translations = payload.items
-    .slice(0, payload.target_count)
-    .map((item) => ({ id: item.id, english: `${prefix} ${item.id}` }));
+  const selected = [] as TranslationPayload["items"];
+  let selectedCharacters = 0;
+  for (const item of payload.items) {
+    if (
+      payload.avoid_adjacent &&
+      selected.at(-1)?.position === item.position - 1
+    ) {
+      continue;
+    }
+    const currentDifference = Math.abs(
+      selectedCharacters - payload.target_characters,
+    );
+    const nextDifference = Math.abs(
+      selectedCharacters + item.character_count - payload.target_characters,
+    );
+    if (selected.length === 0 || nextDifference <= currentDifference) {
+      selected.push(item);
+      selectedCharacters += item.character_count;
+    }
+  }
+  const translations = selected.map((item) => ({
+    id: item.id,
+    english: `${prefix} ${item.id}`,
+  }));
   return new Response(
     JSON.stringify({
       status: "completed",
@@ -272,6 +293,33 @@ describe("background translation flow", () => {
       expect(result.translations).toHaveLength(101);
     }
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("requests a source-character percentage and avoids adjacent sentences", async () => {
+    seedSettings(20);
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      successfulResponse(payloadFromRequest(init)),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await translatePage(translateMessage(5));
+
+    expect(result).toMatchObject({ ok: true });
+    const payload = payloadFromRequest(fetchMock.mock.calls[0][1]);
+    const totalCharacters = payload.items.reduce(
+      (sum, item) => sum + item.character_count,
+      0,
+    );
+    expect(payload.target_characters).toBe(Math.round(totalCharacters * 0.2));
+    expect(payload.avoid_adjacent).toBe(true);
+    if (result.ok) {
+      const positions = result.translations.map(
+        (translation) => payload.items.find((item) => item.id === translation.id)!.position,
+      );
+      expect(positions.every((position, index) =>
+        index === 0 || position - positions[index - 1] > 1,
+      )).toBe(true);
+    }
   });
 });
 

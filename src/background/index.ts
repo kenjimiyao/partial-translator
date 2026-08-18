@@ -20,11 +20,16 @@ import {
   minimizeDomains,
   normalizeDomain,
 } from "../shared/domain";
-import { calculateTargetCount } from "../shared/target-count";
+import {
+  addSelectionMetadata,
+  calculateTargetCharacters,
+  canAvoidAdjacentSelection,
+} from "../shared/selection";
 import type {
   ExtensionSettings,
   Translation,
   TranslationInputItem,
+  TranslationPromptItem,
   TranslationResponse,
 } from "../shared/types";
 
@@ -157,17 +162,18 @@ function validateTranslatePageMessage(value: unknown): TranslatePageMessage {
 
 async function fetchAndCacheTranslations(
   message: TranslatePageMessage,
+  promptItems: TranslationPromptItem[],
   settings: ExtensionSettings,
   apiKey: string,
-  targetCount: number,
+  targetCharacters: number,
   cacheKey: string,
   cacheEpoch: number,
 ): Promise<Translation[]> {
-  const chunks = createTranslationChunks(message.items, targetCount, {
+  const chunks = createTranslationChunks(promptItems, targetCharacters, {
     pageTitle: message.pageTitle,
     pageUrl: message.pageUrl,
   }).filter(
-    (chunk) => chunk.targetCount > 0,
+    (chunk) => chunk.targetCharacters > 0,
   );
   const chunkTranslations = await runWithDeadline(
     TRANSLATION_JOB_TIMEOUT_MS,
@@ -181,7 +187,9 @@ async function fetchAndCacheTranslations(
             {
               page_title: message.pageTitle,
               page_url: message.pageUrl,
-              target_count: chunk.targetCount,
+              target_characters: chunk.targetCharacters,
+              max_character_deviation: chunk.maxCharacterDeviation,
+              avoid_adjacent: chunk.avoidAdjacent,
               items: chunk.items,
             },
             { signal },
@@ -192,8 +200,9 @@ async function fetchAndCacheTranslations(
 
   const validated = validateTranslations(
     { translations },
-    message.items,
-    targetCount,
+    promptItems,
+    targetCharacters,
+    canAvoidAdjacentSelection(promptItems, targetCharacters),
   );
   // CLEAR_CACHE invalidates the epoch before deleting storage. A request that
   // was already on the wire may still finish, but it must not repopulate the
@@ -220,8 +229,12 @@ async function translatePage(messageValue: unknown): Promise<TranslationResponse
       throw new ExtensionError("API_KEY_MISSING", "OpenAI APIキーが設定されていません。");
     }
 
-    const targetCount = calculateTargetCount(message.items.length, settings.translationRate);
-    if (targetCount === 0) {
+    const promptItems = addSelectionMetadata(message.items);
+    const targetCharacters = calculateTargetCharacters(
+      message.items,
+      settings.translationRate,
+    );
+    if (targetCharacters === 0) {
       throw new ExtensionError("ZERO_RATE", "翻訳率が0%のため、翻訳は行いませんでした。");
     }
 
@@ -240,8 +253,9 @@ async function translatePage(messageValue: unknown): Promise<TranslationResponse
           ok: true,
           translations: validateTranslations(
             { translations: cached },
-            message.items,
-            targetCount,
+            promptItems,
+            targetCharacters,
+            canAvoidAdjacentSelection(promptItems, targetCharacters),
           ),
           fromCache: true,
         };
@@ -254,15 +268,25 @@ async function translatePage(messageValue: unknown): Promise<TranslationResponse
       cacheKey,
       (cacheEpoch) => fetchAndCacheTranslations(
         message,
+        promptItems,
         settings,
         apiKey,
-        targetCount,
+        targetCharacters,
         cacheKey,
         cacheEpoch,
       ),
     );
     return { ok: true, translations: await work.promise, fromCache: false };
   } catch (error) {
+    console.error("[N% English] Page translation failed", {
+      error,
+      pageUrl: isPlainObject(messageValue) && typeof messageValue.pageUrl === "string"
+        ? messageValue.pageUrl
+        : undefined,
+      itemCount: isPlainObject(messageValue) && Array.isArray(messageValue.items)
+        ? messageValue.items.length
+        : undefined,
+    });
     return { ok: false, error: toPublicError(error) };
   }
 }
@@ -319,7 +343,8 @@ async function handleActionClick(tab: chrome.tabs.Tab): Promise<void> {
 
   try {
     await storageIsolationReady;
-  } catch {
+  } catch (error) {
+    console.error("[N% English] Storage isolation initialization failed", error);
     await setTabBadge(tab.id, "error");
     return;
   }
@@ -334,7 +359,11 @@ async function handleActionClick(tab: chrome.tabs.Tab): Promise<void> {
   try {
     await chrome.tabs.sendMessage(tab.id, { type: "TOGGLE_TRANSLATION" });
     return;
-  } catch {
+  } catch (error) {
+    console.info("[N% English] Content script was not reachable; injecting it", {
+      reason: error,
+      tabId: tab.id,
+    });
     await setTabBadge(tab.id, "processing");
   }
 
@@ -343,7 +372,12 @@ async function handleActionClick(tab: chrome.tabs.Tab): Promise<void> {
       target: { tabId: tab.id, allFrames: false },
       files: ["content.js"],
     });
-  } catch {
+  } catch (error) {
+    console.error("[N% English] Failed to inject the content script", {
+      error,
+      tabId: tab.id,
+      pageUrl: tab.url,
+    });
     await setTabBadge(tab.id, "unsupported");
   }
 }
@@ -409,6 +443,7 @@ async function handleMessage(
             Boolean(saveMessage.apiKey?.trim()) || apiKeyWasConfigured,
         };
       } catch (error) {
+        console.error("[N% English] Failed to save settings", error);
         return { ok: false, error: toPublicError(error) };
       }
     }
@@ -419,6 +454,7 @@ async function handleMessage(
         await translationCache.clear();
         return { ok: true };
       } catch (error) {
+        console.error("[N% English] Failed to clear the translation cache", error);
         return { ok: false, error: toPublicError(error) };
       }
 
@@ -428,6 +464,7 @@ async function handleMessage(
         await reconcileAutomaticContentScript(settings.domains, true);
         return { ok: true };
       } catch (error) {
+        console.error("[N% English] Failed to reconcile automatic translation", error);
         return { ok: false, error: toPublicError(error) };
       }
 
@@ -452,13 +489,25 @@ async function handleMessage(
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   void handleMessage(message, sender).then(sendResponse).catch((error) => {
+    console.error("[N% English] Unhandled background message error", {
+      error,
+      messageType: isPlainObject(message) && typeof message.type === "string"
+        ? message.type
+        : "unknown",
+      senderTabId: sender.tab?.id,
+    });
     sendResponse({ ok: false, error: toPublicError(error) });
   });
   return true;
 });
 
 chrome.action.onClicked.addListener((tab) => {
-  void handleActionClick(tab).catch(() => {
+  void handleActionClick(tab).catch((error) => {
+    console.error("[N% English] Extension action failed", {
+      error,
+      tabId: tab.id,
+      pageUrl: tab.url,
+    });
     if (tab.id !== undefined) {
       void setTabBadge(tab.id, "error").catch(() => undefined);
     }
@@ -469,14 +518,14 @@ chrome.runtime.onInstalled.addListener(() => {
   void storageIsolationReady
     .then(() => settingsRepository.getSettings())
     .then((settings) => reconcileAutomaticContentScript(settings.domains))
-    .catch(() => undefined);
+    .catch((error) => console.error("[N% English] Install initialization failed", error));
 });
 
 chrome.runtime.onStartup.addListener(() => {
   void storageIsolationReady
     .then(() => settingsRepository.getSettings())
     .then((settings) => reconcileAutomaticContentScript(settings.domains))
-    .catch(() => undefined);
+    .catch((error) => console.error("[N% English] Startup initialization failed", error));
 });
 
 chrome.permissions.onRemoved.addListener(() => {

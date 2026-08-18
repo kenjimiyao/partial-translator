@@ -6,6 +6,8 @@ const DISPLAY_DURATION_MS = 4_500;
 export class PageToast implements ToastPort {
   private readonly host: HTMLDivElement;
   private readonly messageElement: HTMLDivElement;
+  private readonly textElement: HTMLSpanElement;
+  private readonly closeButton: HTMLButtonElement;
   private hideTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly documentNode: Document = document) {
@@ -37,6 +39,25 @@ export class PageToast implements ToastPort {
         transform: translateY(-6px);
         transition: opacity 120ms ease, transform 120ms ease;
       }
+      .toast-row { display: flex; align-items: flex-start; gap: 10px; }
+      .toast-text { flex: 1; }
+      .toast-close {
+        display: none;
+        margin: -5px -7px -5px 0;
+        padding: 4px 7px;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        font: 18px/1 sans-serif;
+        pointer-events: auto;
+      }
+      .toast-close:hover, .toast-close:focus-visible {
+        background: rgba(255, 255, 255, 0.18);
+        outline: none;
+      }
+      .toast[data-kind="error"] .toast-close { display: block; }
       .toast[data-visible="true"] {
         opacity: 1;
         transform: translateY(0);
@@ -48,6 +69,18 @@ export class PageToast implements ToastPort {
     this.messageElement = documentNode.createElement("div");
     this.messageElement.className = "toast";
     this.messageElement.setAttribute("role", "status");
+    const row = documentNode.createElement("div");
+    row.className = "toast-row";
+    this.textElement = documentNode.createElement("span");
+    this.textElement.className = "toast-text";
+    this.closeButton = documentNode.createElement("button");
+    this.closeButton.className = "toast-close";
+    this.closeButton.type = "button";
+    this.closeButton.setAttribute("aria-label", "エラーメッセージを閉じる");
+    this.closeButton.textContent = "×";
+    this.closeButton.addEventListener("click", () => this.hide());
+    row.append(this.textElement, this.closeButton);
+    this.messageElement.append(row);
     shadow.append(style, this.messageElement);
     (documentNode.body ?? documentNode.documentElement).append(this.host);
   }
@@ -60,12 +93,24 @@ export class PageToast implements ToastPort {
       clearTimeout(this.hideTimer);
     }
 
-    this.messageElement.textContent = message;
+    this.textElement.textContent = message;
     this.messageElement.dataset.kind = kind;
     this.messageElement.dataset.visible = "true";
-    this.hideTimer = setTimeout(() => {
-      this.messageElement.dataset.visible = "false";
+    this.messageElement.setAttribute("role", kind === "error" ? "alert" : "status");
+    if (kind === "error") {
       this.hideTimer = undefined;
+      return;
+    }
+    this.hideTimer = setTimeout(() => {
+      this.hide();
     }, DISPLAY_DURATION_MS);
+  }
+
+  private hide(): void {
+    if (this.hideTimer !== undefined) {
+      clearTimeout(this.hideTimer);
+      this.hideTimer = undefined;
+    }
+    this.messageElement.dataset.visible = "false";
   }
 }

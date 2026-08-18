@@ -9,6 +9,13 @@ export interface TranslationInputItem {
   section_heading: string;
 }
 
+export interface TranslationPromptItem extends TranslationInputItem {
+  /** Zero-based position in the page-wide candidate sequence. */
+  position: number;
+  /** Unicode source-text characters excluding whitespace. */
+  character_count: number;
+}
+
 export interface Translation {
   id: string;
   english: string;
@@ -17,8 +24,10 @@ export interface Translation {
 export interface TranslationPayload {
   page_title: string;
   page_url: string;
-  target_count: number;
-  items: TranslationInputItem[];
+  target_characters: number;
+  max_character_deviation: number;
+  avoid_adjacent: boolean;
+  items: TranslationPromptItem[];
 }
 
 export type ExtensionErrorCode =

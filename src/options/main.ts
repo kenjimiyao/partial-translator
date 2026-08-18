@@ -147,6 +147,7 @@ async function loadSettings(): Promise<void> {
       hideStatus();
     }
   } catch (error) {
+    console.error("[N% English] Failed to load settings", error);
     setTranslationRate(20);
     savedDomains = [];
     apiKeyConfigured = false;
@@ -271,6 +272,11 @@ async function saveSettings(options: {
       removalWarning ? "info" : "success",
     );
   } catch (error) {
+    console.error("[N% English] Failed to save settings", {
+      error,
+      domainCount: options.domains.length,
+      translationRate: options.translationRate,
+    });
     let rollbackWarning = "";
     if (confirmedSaveFailure && rollbackHasUnsafeOverlap) {
       rollbackWarning =
@@ -312,6 +318,7 @@ async function clearTranslationCache(): Promise<void> {
     }
     showStatus("翻訳キャッシュを削除しました。", "success");
   } catch (error) {
+    console.error("[N% English] Failed to clear the translation cache", error);
     showStatus(
       safeErrorMessage(error, "翻訳キャッシュを削除できませんでした。"),
       "error",
