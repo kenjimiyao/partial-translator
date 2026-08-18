@@ -96,7 +96,7 @@ describe("Responses API client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("retries when the model selects adjacent sentences", async () => {
+  it("accepts adjacent model selections as a quality warning without retrying", async () => {
     const spacedPayload = {
       ...payload,
       target_characters: 16,
@@ -108,62 +108,89 @@ describe("Responses API client", () => {
         character_count: 8,
       })),
     };
-    const fetchMock = vi
-      .fn(async () => apiResponse(""))
-      .mockResolvedValueOnce(
-        apiResponse(JSON.stringify({
-          translations: [
-            { id: "sentence-0001", english: "One." },
-            { id: "sentence-0002", english: "Two." },
-          ],
-        })),
-      )
-      .mockResolvedValueOnce(
-        apiResponse(JSON.stringify({
-          translations: [
-            { id: "sentence-0001", english: "One." },
-            { id: "sentence-0003", english: "Three." },
-          ],
-        })),
-      );
-
-    await expect(
-      requestTranslations("secret-key", spacedPayload, { fetchImpl: fetchMock }),
-    ).resolves.toHaveLength(2);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("accepts adjacent sentences after one failed spacing retry", async () => {
-    const spacedPayload = {
-      ...payload,
-      target_characters: 16,
-      items: [0, 1, 2].map((position) => ({
-        id: `sentence-000${position + 1}`,
-        text: "これは文章です。",
-        section_heading: "見出し",
-        position,
-        character_count: 8,
+    const fetchMock = vi.fn(async () =>
+      apiResponse(JSON.stringify({
+        translations: [
+          { id: "sentence-0001", english: "One." },
+          { id: "sentence-0002", english: "Two." },
+        ],
       })),
-    };
-    const adjacentResponse = apiResponse(JSON.stringify({
-      translations: [
-        { id: "sentence-0001", english: "One." },
-        { id: "sentence-0002", english: "Two." },
-      ],
-    }));
-    const fetchMock = vi
-      .fn(async () => adjacentResponse.clone())
-      .mockResolvedValueOnce(adjacentResponse.clone())
-      .mockResolvedValueOnce(adjacentResponse.clone());
+    );
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await expect(
       requestTranslations("secret-key", spacedPayload, { fetchImpl: fetchMock }),
     ).resolves.toHaveLength(2);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(warning).toHaveBeenCalledWith(
-      expect.stringContaining("Accepting adjacent translations"),
+      expect.stringContaining("Locally adjusted"),
       expect.objectContaining({ adjacentPositions: [0] }),
+    );
+    warning.mockRestore();
+  });
+
+  it("trims an oversized model selection locally without retrying", async () => {
+    const spacedPayload = {
+      ...payload,
+      target_characters: 8,
+      items: [0, 1, 2].map((position) => ({
+        id: `sentence-000${position + 1}`,
+        text: "これは文章です。",
+        section_heading: "見出し",
+        position,
+        character_count: 8,
+      })),
+    };
+    const oversizedResponse = apiResponse(JSON.stringify({
+      translations: [
+        { id: "sentence-0001", english: "One." },
+        { id: "sentence-0003", english: "Three." },
+      ],
+    }));
+    const fetchMock = vi.fn(async () => oversizedResponse.clone());
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(
+      requestTranslations("secret-key", spacedPayload, { fetchImpl: fetchMock }),
+    ).resolves.toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining("Locally adjusted"),
+      expect.objectContaining({ removedTranslationCount: 1 }),
+    );
+    warning.mockRestore();
+  });
+
+  it("keeps an undersized model selection instead of failing", async () => {
+    const largerTargetPayload = {
+      ...payload,
+      target_characters: 16,
+      items: [0, 1, 2].map((position) => ({
+        id: `sentence-000${position + 1}`,
+        text: "これは文章です。",
+        section_heading: "見出し",
+        position,
+        character_count: 8,
+      })),
+    };
+    const fetchMock = vi.fn(async () =>
+      apiResponse(JSON.stringify({
+        translations: [{ id: "sentence-0001", english: "One." }],
+      })),
+    );
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(
+      requestTranslations("secret-key", largerTargetPayload, { fetchImpl: fetchMock }),
+    ).resolves.toEqual([{ id: "sentence-0001", english: "One." }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining("Locally adjusted"),
+      expect.objectContaining({
+        selectedCharacters: 8,
+        adjustedCharacters: 8,
+        removedTranslationCount: 0,
+      }),
     );
     warning.mockRestore();
   });

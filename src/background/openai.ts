@@ -4,7 +4,9 @@ import {
   TRANSLATION_INSTRUCTIONS,
 } from "../shared/constants";
 import {
+  canAvoidAdjacentSelection,
   characterTargetTolerance,
+  selectClosestCharacterPlan,
   totalSourceCharacters,
 } from "../shared/selection";
 import type {
@@ -60,7 +62,7 @@ export function validateTranslations(
   targetCharacters: number,
   avoidAdjacent: boolean,
   maxCharacterDeviation?: number,
-  allowAdjacentFallback = false,
+  allowQualityFallback = false,
 ): Translation[] {
   if (!isPlainObject(value) || !Array.isArray(value.translations)) {
     throw new ExtensionError("INVALID_RESPONSE", "OpenAI APIから不正なレスポンスを受信しました。");
@@ -101,40 +103,63 @@ export function validateTranslations(
     targetCharacters,
     avoidAdjacent,
   );
-  if (
+  const characterTargetMissed =
     (targetCharacters >= availableCharacters && selectedCharacters !== availableCharacters) ||
-    Math.abs(selectedCharacters - targetCharacters) > tolerance
-  ) {
+    Math.abs(selectedCharacters - targetCharacters) > tolerance;
+
+  const selectedPositions = new Set(selectedItems.map((item) => item.position));
+  const adjacentPositions = avoidAdjacent
+    ? [...selectedPositions].filter(
+        (position) => selectedPositions.has(position + 1),
+      )
+    : [];
+
+  if (characterTargetMissed && !allowQualityFallback) {
     throw new ExtensionError(
       "INVALID_RESPONSE",
       "OpenAI APIの翻訳文字数が指定割合から外れています。",
     );
   }
-
-  if (avoidAdjacent) {
-    const selectedPositions = new Set(selectedItems.map((item) => item.position));
-    const adjacentPositions = [...selectedPositions].filter(
-      (position) => selectedPositions.has(position + 1),
+  if (adjacentPositions.length > 0 && !allowQualityFallback) {
+    throw new ExtensionError(
+      "INVALID_RESPONSE",
+      "OpenAI APIが連続する文章を選択しました。",
     );
-    if (adjacentPositions.length > 0 && !allowAdjacentFallback) {
-      throw new ExtensionError(
-        "INVALID_RESPONSE",
-        "OpenAI APIが連続する文章を選択しました。",
-      );
-    }
-    if (adjacentPositions.length > 0) {
-      console.warn(
-        "[N% English] Accepting adjacent translations after the model could not satisfy the spacing preference",
-        {
-          adjacentPositions,
-          selectedCharacters,
-          targetCharacters,
-        },
-      );
-    }
   }
 
-  return translations;
+  if (!allowQualityFallback || (!characterTargetMissed && adjacentPositions.length === 0)) {
+    return translations;
+  }
+
+  const locallyAvoidAdjacent =
+    avoidAdjacent &&
+    canAvoidAdjacentSelection(selectedItems, targetCharacters);
+  const adjustedItems = selectClosestCharacterPlan(
+    selectedItems,
+    targetCharacters,
+    locallyAvoidAdjacent,
+  );
+  const translationById = new Map(
+    translations.map((translation) => [translation.id, translation]),
+  );
+  const adjustedTranslations = adjustedItems.map(
+    (item) => translationById.get(item.id)!,
+  );
+  const adjustedCharacters = totalSourceCharacters(adjustedItems);
+  const adjustedPositions = new Set(adjustedItems.map((item) => item.position));
+  const remainingAdjacentPositions = [...adjustedPositions].filter(
+    (position) => adjustedPositions.has(position + 1),
+  );
+
+  console.warn("[N% English] Locally adjusted a model selection quality mismatch", {
+    selectedCharacters,
+    adjustedCharacters,
+    targetCharacters,
+    removedTranslationCount: translations.length - adjustedTranslations.length,
+    adjacentPositions: remainingAdjacentPositions,
+  });
+
+  return adjustedTranslations;
 }
 
 function extractOutputText(response: unknown): string {
@@ -276,7 +301,7 @@ export async function requestTranslations(
         payload.target_characters,
         payload.avoid_adjacent,
         payload.max_character_deviation,
-        attempt > 0,
+        true,
       );
     } catch (error) {
       const isValidationFailure =
