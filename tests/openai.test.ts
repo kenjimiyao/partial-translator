@@ -133,6 +133,41 @@ describe("Responses API client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("accepts adjacent sentences after one failed spacing retry", async () => {
+    const spacedPayload = {
+      ...payload,
+      target_characters: 16,
+      items: [0, 1, 2].map((position) => ({
+        id: `sentence-000${position + 1}`,
+        text: "これは文章です。",
+        section_heading: "見出し",
+        position,
+        character_count: 8,
+      })),
+    };
+    const adjacentResponse = apiResponse(JSON.stringify({
+      translations: [
+        { id: "sentence-0001", english: "One." },
+        { id: "sentence-0002", english: "Two." },
+      ],
+    }));
+    const fetchMock = vi
+      .fn(async () => adjacentResponse.clone())
+      .mockResolvedValueOnce(adjacentResponse.clone())
+      .mockResolvedValueOnce(adjacentResponse.clone());
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(
+      requestTranslations("secret-key", spacedPayload, { fetchImpl: fetchMock }),
+    ).resolves.toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining("Accepting adjacent translations"),
+      expect.objectContaining({ adjacentPositions: [0] }),
+    );
+    warning.mockRestore();
+  });
+
   it("retries malformed HTTP JSON once as an invalid response", async () => {
     const fetchMock = vi
       .fn(async (_input: RequestInfo | URL, _init?: RequestInit) => apiResponse(""))

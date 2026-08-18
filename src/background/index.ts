@@ -203,6 +203,8 @@ async function fetchAndCacheTranslations(
     promptItems,
     targetCharacters,
     canAvoidAdjacentSelection(promptItems, targetCharacters),
+    undefined,
+    true,
   );
   // CLEAR_CACHE invalidates the epoch before deleting storage. A request that
   // was already on the wire may still finish, but it must not repopulate the
@@ -256,6 +258,8 @@ async function translatePage(messageValue: unknown): Promise<TranslationResponse
             promptItems,
             targetCharacters,
             canAvoidAdjacentSelection(promptItems, targetCharacters),
+            undefined,
+            true,
           ),
           fromCache: true,
         };

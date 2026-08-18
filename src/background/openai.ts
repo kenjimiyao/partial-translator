@@ -60,6 +60,7 @@ export function validateTranslations(
   targetCharacters: number,
   avoidAdjacent: boolean,
   maxCharacterDeviation?: number,
+  allowAdjacentFallback = false,
 ): Translation[] {
   if (!isPlainObject(value) || !Array.isArray(value.translations)) {
     throw new ExtensionError("INVALID_RESPONSE", "OpenAI APIから不正なレスポンスを受信しました。");
@@ -112,14 +113,23 @@ export function validateTranslations(
 
   if (avoidAdjacent) {
     const selectedPositions = new Set(selectedItems.map((item) => item.position));
-    if (
-      [...selectedPositions].some(
-        (position) => selectedPositions.has(position + 1),
-      )
-    ) {
+    const adjacentPositions = [...selectedPositions].filter(
+      (position) => selectedPositions.has(position + 1),
+    );
+    if (adjacentPositions.length > 0 && !allowAdjacentFallback) {
       throw new ExtensionError(
         "INVALID_RESPONSE",
         "OpenAI APIが連続する文章を選択しました。",
+      );
+    }
+    if (adjacentPositions.length > 0) {
+      console.warn(
+        "[N% English] Accepting adjacent translations after the model could not satisfy the spacing preference",
+        {
+          adjacentPositions,
+          selectedCharacters,
+          targetCharacters,
+        },
       );
     }
   }
@@ -266,6 +276,7 @@ export async function requestTranslations(
         payload.target_characters,
         payload.avoid_adjacent,
         payload.max_character_deviation,
+        attempt > 0,
       );
     } catch (error) {
       const isValidationFailure =
