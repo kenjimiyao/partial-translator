@@ -63,7 +63,7 @@ describe("content translation", () => {
     expect(paragraph.childNodes).toHaveLength(1);
   });
 
-  it("restores clicked translations individually and keeps later offsets accurate", () => {
+  it("toggles clicked translations repeatedly and keeps later offsets accurate", () => {
     document.body.innerHTML =
       '<p id="article">これは最初の文章です。 これは二番目の文章です！</p>';
     const paragraph = document.querySelector("#article") as HTMLParagraphElement;
@@ -74,14 +74,24 @@ describe("content translation", () => {
       { id: "sentence-0002", english: "Second sentence." },
     ]);
 
-    expect(session.restoreAt(node, 5)).toBe("restored");
+    expect(session.toggleAt(node, 5)).toBe("restored");
     expect(paragraph.textContent).toBe(
       "これは最初の文章です。 Second sentence.",
     );
     expect(session.hasActiveTranslations).toBe(true);
 
+    expect(session.toggleAt(node, 5)).toBe("translated");
+    expect(paragraph.textContent).toBe(
+      "A much longer first sentence. Second sentence.",
+    );
+
     const secondOffset = node.data.indexOf("Second") + 3;
-    expect(session.restoreAt(node, secondOffset)).toBe("restored");
+    expect(session.toggleAt(node, secondOffset)).toBe("restored");
+    expect(paragraph.textContent).toBe(
+      "A much longer first sentence. これは二番目の文章です！",
+    );
+    expect(session.hasActiveTranslations).toBe(true);
+    expect(session.toggleAt(node, 5)).toBe("restored");
     expect(paragraph.textContent).toBe(
       "これは最初の文章です。 これは二番目の文章です！",
     );
@@ -173,7 +183,7 @@ describe("content translation", () => {
     expect(link.firstChild).toBe(originalNode);
   });
 
-  it("restores a clicked translated link without navigating", async () => {
+  it("toggles a clicked translated link both ways without navigating", async () => {
     document.body.innerHTML =
       '<article><a id="link" href="/next">これはクリックで戻す十分に長い文章です。</a></article>';
     const link = document.querySelector("#link") as HTMLAnchorElement;
@@ -213,14 +223,36 @@ describe("content translation", () => {
     expect(link.textContent).toBe("これはクリックで戻す十分に長い文章です。");
     expect(link.firstChild).toBe(originalNode);
     expect(link.getAttribute("href")).toBe("/next");
-    expect(controller.currentMode).toBe("idle");
+    expect(controller.currentMode).toBe("translated");
     await vi.waitFor(() =>
       expect(messages).toContainEqual({
         type: "SET_TAB_STATUS",
         status: "restored",
       }),
     );
-    expect(toast.calls.at(-1)).toContain("すべての文章");
+    expect(toast.calls.at(-1)).toContain("日本語");
+
+    const secondClick = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 10,
+      clientY: 10,
+    });
+    expect(controller.handlePageClick(secondClick)).toBe(true);
+    expect(secondClick.defaultPrevented).toBe(true);
+    expect(link.textContent).toBe("Click this translated sentence to restore it.");
+    expect(link.firstChild).toBe(originalNode);
+    expect(link.getAttribute("href")).toBe("/next");
+    await vi.waitFor(() => {
+      expect(messages).toContainEqual({
+        type: "SET_TAB_STATUS",
+        status: "translated",
+      });
+      expect(toast.calls.at(-1)).toContain("英語");
+    });
+    expect(messages.filter(
+      (message) => (message as { type?: string }).type === "TRANSLATE_PAGE",
+    )).toHaveLength(1);
 
     Reflect.deleteProperty(document, "caretPositionFromPoint");
   });
@@ -263,6 +295,22 @@ describe("content translation", () => {
 
     expect(restored).toBe(false);
     expect(target.textContent).toBe("ページ側が後から更新した内容です。");
+  });
+
+  it("does not toggle a translated range after the page changes its Text node", () => {
+    document.body.innerHTML =
+      '<p id="target">これはページ側でも更新される文章です。</p>';
+    const target = document.querySelector("#target") as HTMLParagraphElement;
+    const node = target.firstChild as Text;
+    const candidates = extractJapaneseSentences(target);
+    const session = applyTranslations(candidates, [
+      { id: "sentence-0001", english: "This text was translated." },
+    ]);
+
+    node.data = "The page replaced this text itself.";
+
+    expect(session.toggleAt(node, 5)).toBe("conflict");
+    expect(target.textContent).toBe("The page replaced this text itself.");
   });
 
   it("rejects invalid translation IDs, duplicates, and empty output before mutation", () => {

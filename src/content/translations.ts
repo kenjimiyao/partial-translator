@@ -8,9 +8,11 @@ export class TranslationValidationError extends Error {
 }
 
 interface ActiveReplacement {
+  english: string;
   original: string;
   start: number;
   end: number;
+  state: "original" | "translated";
 }
 
 interface NodeSnapshot {
@@ -19,7 +21,11 @@ interface NodeSnapshot {
   replacements: ActiveReplacement[];
 }
 
-export type RestoreAtResult = "restored" | "conflict" | "none";
+export type ToggleAtResult =
+  | "restored"
+  | "translated"
+  | "conflict"
+  | "none";
 
 export function validateTranslations(
   candidates: readonly ExtractedSentence[],
@@ -54,21 +60,20 @@ export function validateTranslations(
 }
 
 export class TranslationSession {
-  private restored = false;
-
   constructor(
     private readonly snapshots: Map<Text, NodeSnapshot>,
   ) {}
 
   get hasActiveTranslations(): boolean {
-    return this.snapshots.size > 0;
+    for (const snapshot of this.snapshots.values()) {
+      if (snapshot.replacements.some(({ state }) => state === "translated")) {
+        return true;
+      }
+    }
+    return false;
   }
 
-  restoreAt(node: Text, offset: number): RestoreAtResult {
-    if (this.restored) {
-      return "none";
-    }
-
+  toggleAt(node: Text, offset: number): ToggleAtResult {
     const snapshot = this.snapshots.get(node);
     if (!snapshot) {
       return "none";
@@ -85,19 +90,26 @@ export class TranslationSession {
     }
 
     const replacement = snapshot.replacements[replacementIndex];
-    const translatedLength = replacement.end - replacement.start;
+    const currentLength = replacement.end - replacement.start;
+    const nextText =
+      replacement.state === "translated"
+        ? replacement.original
+        : replacement.english;
+    const nextState =
+      replacement.state === "translated" ? "original" : "translated";
     try {
       node.replaceData(
         replacement.start,
-        translatedLength,
-        replacement.original,
+        currentLength,
+        nextText,
       );
     } catch {
       return "conflict";
     }
 
-    const offsetDelta = replacement.original.length - translatedLength;
-    snapshot.replacements.splice(replacementIndex, 1);
+    const offsetDelta = nextText.length - currentLength;
+    replacement.end = replacement.start + nextText.length;
+    replacement.state = nextState;
     for (const remaining of snapshot.replacements) {
       if (remaining.start > replacement.start) {
         remaining.start += offsetDelta;
@@ -105,16 +117,11 @@ export class TranslationSession {
       }
     }
     snapshot.expected = node.data;
-
-    if (snapshot.replacements.length === 0) {
-      this.snapshots.delete(node);
-    }
-    this.restored = this.snapshots.size === 0;
-    return "restored";
+    return nextState === "translated" ? "translated" : "restored";
   }
 
   restore(): boolean {
-    if (this.restored) {
+    if (this.snapshots.size === 0) {
       return true;
     }
 
@@ -125,8 +132,7 @@ export class TranslationSession {
         this.snapshots.delete(node);
       }
     }
-    this.restored = this.snapshots.size === 0;
-    return this.restored;
+    return this.snapshots.size === 0;
   }
 }
 
@@ -202,9 +208,11 @@ export function applyTranslations(
         offsetDelta +=
           english.length - (candidate.end - candidate.start);
         return {
+          english,
           original: candidate.text,
           start,
           end,
+          state: "translated" as const,
         };
       });
     snapshots.set(node, {

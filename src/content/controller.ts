@@ -166,7 +166,7 @@ export class TranslationController {
       return false;
     }
 
-    const result = this.session.restoreAt(position.node, position.offset);
+    const result = this.session.toggleAt(position.node, position.offset);
     if (result === "none") {
       return false;
     }
@@ -176,16 +176,15 @@ export class TranslationController {
     const interactionVersion = ++this.interactionVersion;
 
     if (result === "conflict") {
-      void this.reportClickedRestoreConflict(interactionVersion);
+      void this.reportClickedToggleConflict(interactionVersion);
       return true;
     }
 
-    const fullyRestored = !this.session.hasActiveTranslations;
-    if (fullyRestored) {
-      this.session = undefined;
-      this.mode = "idle";
-    }
-    void this.reportClickedRestore(fullyRestored, interactionVersion);
+    void this.reportClickedToggle(
+      result,
+      this.session.hasActiveTranslations,
+      interactionVersion,
+    );
     return true;
   }
 
@@ -196,6 +195,17 @@ export class TranslationController {
     }
 
     if (this.mode === "translated" && this.session) {
+      if (!this.session.hasActiveTranslations) {
+        // Preserve the existing action-button behavior: after every sentence was
+        // individually switched to Japanese, clicking the extension translates
+        // the page again. The sentence session remains available until then so a
+        // click on the Japanese text can still switch it back to English locally.
+        this.session = undefined;
+        this.mode = "idle";
+        await this.translate();
+        return;
+      }
+
       const interactionVersion = ++this.interactionVersion;
       const fullyRestored = this.session.restore();
       if (!fullyRestored) {
@@ -310,7 +320,7 @@ export class TranslationController {
         return;
       }
       this.toast.show(
-        `${translations.length}件の文章を英語に置き換えました。英語の文章をクリックすると、その文章だけ日本語に戻せます。`,
+        `${translations.length}件の文章を英語に置き換えました。文章をクリックするたびに、日本語と英語を切り替えられます。`,
         "success",
       );
     } catch (error) {
@@ -354,30 +364,31 @@ export class TranslationController {
     await operation;
   }
 
-  private async reportClickedRestore(
-    fullyRestored: boolean,
+  private async reportClickedToggle(
+    result: "restored" | "translated",
+    hasActiveTranslations: boolean,
     interactionVersion: number,
   ): Promise<void> {
-    await this.setStatus(fullyRestored ? "restored" : "translated");
+    await this.setStatus(hasActiveTranslations ? "translated" : "restored");
     if (this.interactionVersion !== interactionVersion) {
       return;
     }
     this.toast.show(
-      fullyRestored
-        ? "すべての文章を日本語に戻しました。"
+      result === "translated"
+        ? "クリックした文章を英語に戻しました。"
         : "クリックした文章を日本語に戻しました。",
       "success",
     );
   }
 
-  private async reportClickedRestoreConflict(
+  private async reportClickedToggleConflict(
     interactionVersion: number,
   ): Promise<void> {
-    console.error("[N% English] Could not restore the clicked translation because the page changed");
+    console.error("[N% English] Could not toggle the clicked translation because the page changed");
     await this.setStatus("error");
     if (this.interactionVersion === interactionVersion) {
       this.toast.show(
-        "ページ内容が更新されたため、この文章を復元できませんでした。ページを再読み込みしてください。",
+        "ページ内容が更新されたため、この文章の表示を切り替えられませんでした。ページを再読み込みしてください。",
         "error",
       );
     }
