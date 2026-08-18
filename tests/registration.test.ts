@@ -2,15 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { reconcileAutomaticContentScript } from "../src/background/registration";
 
-const allowedPattern = "*://*.allowed.example/*";
-const blockedPattern = "*://*.blocked.example/*";
+const allowedPatterns = [
+  "http://*.allowed.example/*",
+  "https://*.allowed.example/*",
+];
 
 function installChromeMock(existing = false) {
   const registerContentScripts = vi.fn(async () => undefined);
   const updateContentScripts = vi.fn(async () => undefined);
   const unregisterContentScripts = vi.fn(async () => undefined);
   const contains = vi.fn(async ({ origins }: chrome.permissions.Permissions) =>
-    origins?.every((origin) => origin === allowedPattern) ?? true,
+    origins?.every((origin) => allowedPatterns.includes(origin)) ?? true,
   );
 
   vi.stubGlobal("chrome", {
@@ -39,7 +41,7 @@ describe("dynamic content script registration", () => {
     await reconcileAutomaticContentScript(["allowed.example", "blocked.example"]);
 
     expect(chromeMock.updateContentScripts).toHaveBeenCalledWith([
-      expect.objectContaining({ matches: [allowedPattern] }),
+      expect.objectContaining({ matches: allowedPatterns }),
     ]);
     expect(chromeMock.unregisterContentScripts).not.toHaveBeenCalled();
   });
@@ -55,7 +57,7 @@ describe("dynamic content script registration", () => {
     ).rejects.toMatchObject({ code: "SITE_PERMISSION_MISSING" });
 
     expect(chromeMock.registerContentScripts).toHaveBeenCalledWith([
-      expect.objectContaining({ matches: [allowedPattern] }),
+      expect.objectContaining({ matches: allowedPatterns }),
     ]);
   });
 

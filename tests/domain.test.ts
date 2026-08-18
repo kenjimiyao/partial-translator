@@ -53,8 +53,11 @@ describe("parseDomainLines", () => {
 });
 
 describe("domain permission patterns", () => {
-  it("uses the Chrome wildcard pattern that includes apex and subdomains", () => {
-    expect(domainToMatchPatterns("example.com")).toEqual(["*://*.example.com/*"]);
+  it("uses manifest-compatible patterns that include apex and subdomains", () => {
+    expect(domainToMatchPatterns("example.com")).toEqual([
+      "http://*.example.com/*",
+      "https://*.example.com/*",
+    ]);
   });
 
   it("checks domain boundaries rather than suffix text alone", () => {
@@ -69,6 +72,11 @@ describe("domain permission patterns", () => {
     ).toEqual(["example.com", "other.example"]);
     expect(
       domainsToMatchPatterns(["news.example.com", "example.com", "other.example"]),
-    ).toEqual(["*://*.example.com/*", "*://*.other.example/*"]);
+    ).toEqual([
+      "http://*.example.com/*",
+      "https://*.example.com/*",
+      "http://*.other.example/*",
+      "https://*.other.example/*",
+    ]);
   });
 });

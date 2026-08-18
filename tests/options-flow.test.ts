@@ -64,7 +64,10 @@ describe("Options save flow", () => {
 
     expect(getAll).toHaveBeenCalledTimes(1);
     expect(request).toHaveBeenCalledWith({
-      origins: ["*://*.example.com/*"],
+      origins: [
+        "http://*.example.com/*",
+        "https://*.example.com/*",
+      ],
     });
     expect(getAll.mock.invocationCallOrder[0]).toBeLessThan(
       request.mock.invocationCallOrder[0],

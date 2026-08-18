@@ -125,12 +125,16 @@ export function minimizeDomains(domains: readonly string[]): string[] {
 }
 
 /**
- * Chrome's wildcard host pattern covers the apex and every subdomain. Its `*`
- * scheme covers HTTP and HTTPS, so one optional origin is sufficient.
+ * Chrome's wildcard host pattern covers the apex and every subdomain. Keep the
+ * schemes separate so runtime requests are direct subsets of the optional host
+ * permissions declared in the manifest.
  */
 export function domainToMatchPatterns(domain: string): string[] {
   const normalized = normalizeDomain(domain);
-  return [`*://*.${normalized}/*`];
+  return [
+    `http://*.${normalized}/*`,
+    `https://*.${normalized}/*`,
+  ];
 }
 
 export function domainsToMatchPatterns(domains: readonly string[]): string[] {
