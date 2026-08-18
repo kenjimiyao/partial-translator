@@ -35,6 +35,14 @@ function bootstrap(): void {
     return true;
   });
 
+  document.addEventListener(
+    "click",
+    (event) => {
+      controller.handlePageClick(event);
+    },
+    true,
+  );
+
   // Dynamically registered domains and first-time activeTab injection both start here.
   void controller.translate();
 }

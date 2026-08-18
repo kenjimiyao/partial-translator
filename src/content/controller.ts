@@ -104,6 +104,37 @@ function userFacingError(code: string, message: string): string {
     : "翻訳中にエラーが発生しました。もう一度お試しください。";
 }
 
+function textPositionAtPoint(
+  documentNode: Document,
+  x: number,
+  y: number,
+): { node: Text; offset: number } | undefined {
+  const caretDocument = documentNode as Document & {
+    caretPositionFromPoint?: (
+      x: number,
+      y: number,
+    ) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+
+  const position = caretDocument.caretPositionFromPoint?.(x, y);
+  if (position?.offsetNode.nodeType === Node.TEXT_NODE) {
+    return {
+      node: position.offsetNode as Text,
+      offset: position.offset,
+    };
+  }
+
+  const range = caretDocument.caretRangeFromPoint?.(x, y);
+  if (range?.startContainer.nodeType === Node.TEXT_NODE) {
+    return {
+      node: range.startContainer as Text,
+      offset: range.startOffset,
+    };
+  }
+  return undefined;
+}
+
 export class TranslationController {
   private mode: ControllerMode = "idle";
   private session: TranslationSession | undefined;
@@ -119,6 +150,43 @@ export class TranslationController {
 
   get currentMode(): ControllerMode {
     return this.mode;
+  }
+
+  handlePageClick(event: MouseEvent): boolean {
+    if (this.mode !== "translated" || !this.session) {
+      return false;
+    }
+
+    const position = textPositionAtPoint(
+      this.documentNode,
+      event.clientX,
+      event.clientY,
+    );
+    if (!position) {
+      return false;
+    }
+
+    const result = this.session.restoreAt(position.node, position.offset);
+    if (result === "none") {
+      return false;
+    }
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const interactionVersion = ++this.interactionVersion;
+
+    if (result === "conflict") {
+      void this.reportClickedRestoreConflict(interactionVersion);
+      return true;
+    }
+
+    const fullyRestored = !this.session.hasActiveTranslations;
+    if (fullyRestored) {
+      this.session = undefined;
+      this.mode = "idle";
+    }
+    void this.reportClickedRestore(fullyRestored, interactionVersion);
+    return true;
   }
 
   async toggle(): Promise<void> {
@@ -242,7 +310,7 @@ export class TranslationController {
         return;
       }
       this.toast.show(
-        `${translations.length}件の文章を英語に置き換えました。`,
+        `${translations.length}件の文章を英語に置き換えました。英語の文章をクリックすると、その文章だけ日本語に戻せます。`,
         "success",
       );
     } catch (error) {
@@ -275,6 +343,34 @@ export class TranslationController {
     });
     this.statusQueue = operation;
     await operation;
+  }
+
+  private async reportClickedRestore(
+    fullyRestored: boolean,
+    interactionVersion: number,
+  ): Promise<void> {
+    await this.setStatus(fullyRestored ? "restored" : "translated");
+    if (this.interactionVersion !== interactionVersion) {
+      return;
+    }
+    this.toast.show(
+      fullyRestored
+        ? "すべての文章を日本語に戻しました。"
+        : "クリックした文章を日本語に戻しました。",
+      "success",
+    );
+  }
+
+  private async reportClickedRestoreConflict(
+    interactionVersion: number,
+  ): Promise<void> {
+    await this.setStatus("error");
+    if (this.interactionVersion === interactionVersion) {
+      this.toast.show(
+        "ページ内容が更新されたため、この文章を復元できませんでした。ページを再読み込みしてください。",
+        "error",
+      );
+    }
   }
 }
 

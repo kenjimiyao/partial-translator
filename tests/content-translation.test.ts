@@ -63,6 +63,32 @@ describe("content translation", () => {
     expect(paragraph.childNodes).toHaveLength(1);
   });
 
+  it("restores clicked translations individually and keeps later offsets accurate", () => {
+    document.body.innerHTML =
+      '<p id="article">これは最初の文章です。 これは二番目の文章です！</p>';
+    const paragraph = document.querySelector("#article") as HTMLParagraphElement;
+    const node = paragraph.firstChild as Text;
+    const candidates = extractJapaneseSentences(paragraph);
+    const session = applyTranslations(candidates, [
+      { id: "sentence-0001", english: "A much longer first sentence." },
+      { id: "sentence-0002", english: "Second sentence." },
+    ]);
+
+    expect(session.restoreAt(node, 5)).toBe("restored");
+    expect(paragraph.textContent).toBe(
+      "これは最初の文章です。 Second sentence.",
+    );
+    expect(session.hasActiveTranslations).toBe(true);
+
+    const secondOffset = node.data.indexOf("Second") + 3;
+    expect(session.restoreAt(node, secondOffset)).toBe("restored");
+    expect(paragraph.textContent).toBe(
+      "これは最初の文章です。 これは二番目の文章です！",
+    );
+    expect(session.hasActiveTranslations).toBe(false);
+    expect(paragraph.childNodes).toHaveLength(1);
+  });
+
   it("does not modify page text when the background reports an API failure", async () => {
     document.title = "テストページ";
     document.body.innerHTML =
@@ -145,6 +171,58 @@ describe("content translation", () => {
     await controller.toggle();
     expect(link.textContent).toBe("これはリンク内の十分に長い文章です。");
     expect(link.firstChild).toBe(originalNode);
+  });
+
+  it("restores a clicked translated link without navigating", async () => {
+    document.body.innerHTML =
+      '<article><a id="link" href="/next">これはクリックで戻す十分に長い文章です。</a></article>';
+    const link = document.querySelector("#link") as HTMLAnchorElement;
+    const originalNode = link.firstChild;
+    const { runtime, messages } = runtimeRespondingWith({
+      ok: true,
+      translations: [
+        {
+          id: "sentence-0001",
+          english: "Click this translated sentence to restore it.",
+        },
+      ],
+    });
+    const toast = recordingToast();
+    const controller = new TranslationController(
+      runtime,
+      toast,
+      document,
+      () => "https://example.com/article",
+    );
+
+    await controller.translate();
+    const translatedNode = link.firstChild as Text;
+    Object.defineProperty(document, "caretPositionFromPoint", {
+      configurable: true,
+      value: vi.fn(() => ({ offsetNode: translatedNode, offset: 8 })),
+    });
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 10,
+      clientY: 10,
+    });
+
+    expect(controller.handlePageClick(click)).toBe(true);
+    expect(click.defaultPrevented).toBe(true);
+    expect(link.textContent).toBe("これはクリックで戻す十分に長い文章です。");
+    expect(link.firstChild).toBe(originalNode);
+    expect(link.getAttribute("href")).toBe("/next");
+    expect(controller.currentMode).toBe("idle");
+    await vi.waitFor(() =>
+      expect(messages).toContainEqual({
+        type: "SET_TAB_STATUS",
+        status: "restored",
+      }),
+    );
+    expect(toast.calls.at(-1)).toContain("すべての文章");
+
+    Reflect.deleteProperty(document, "caretPositionFromPoint");
   });
 
   it("reports a zero-percent result without changing page text", async () => {

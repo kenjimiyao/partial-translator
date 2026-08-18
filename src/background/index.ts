@@ -287,7 +287,7 @@ function isSupportedPageUrl(urlValue: string | undefined): boolean {
 
 const badgeByStatus: Record<ContentStatus | "key" | "unsupported", { text: string; color: string; title: string }> = {
   processing: { text: "…", color: "#3155c6", title: "英訳を処理しています" },
-  translated: { text: "EN", color: "#16794a", title: "英訳を表示中です。クリックで日本語へ戻します" },
+  translated: { text: "EN", color: "#16794a", title: "英訳を表示中です。英語の文章をクリックすると個別に日本語へ戻せます" },
   restored: { text: "", color: "#5f6368", title: "クリックして一部を英訳します" },
   error: { text: "ERR", color: "#b3261e", title: "翻訳中にエラーが発生しました" },
   empty: { text: "0", color: "#5f6368", title: "翻訳対象の日本語文章がありません" },

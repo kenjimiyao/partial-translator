@@ -7,6 +7,20 @@ export class TranslationValidationError extends Error {
   }
 }
 
+interface ActiveReplacement {
+  original: string;
+  start: number;
+  end: number;
+}
+
+interface NodeSnapshot {
+  original: string;
+  expected: string;
+  replacements: ActiveReplacement[];
+}
+
+export type RestoreAtResult = "restored" | "conflict" | "none";
+
 export function validateTranslations(
   candidates: readonly ExtractedSentence[],
   translations: unknown,
@@ -43,11 +57,61 @@ export class TranslationSession {
   private restored = false;
 
   constructor(
-    private readonly snapshots: Map<
-      Text,
-      { original: string; translated: string }
-    >,
+    private readonly snapshots: Map<Text, NodeSnapshot>,
   ) {}
+
+  get hasActiveTranslations(): boolean {
+    return this.snapshots.size > 0;
+  }
+
+  restoreAt(node: Text, offset: number): RestoreAtResult {
+    if (this.restored) {
+      return "none";
+    }
+
+    const snapshot = this.snapshots.get(node);
+    if (!snapshot) {
+      return "none";
+    }
+    const replacementIndex = snapshot.replacements.findIndex(
+      (replacement) =>
+        offset >= replacement.start && offset <= replacement.end,
+    );
+    if (replacementIndex < 0) {
+      return "none";
+    }
+    if (!node.isConnected || node.data !== snapshot.expected) {
+      return "conflict";
+    }
+
+    const replacement = snapshot.replacements[replacementIndex];
+    const translatedLength = replacement.end - replacement.start;
+    try {
+      node.replaceData(
+        replacement.start,
+        translatedLength,
+        replacement.original,
+      );
+    } catch {
+      return "conflict";
+    }
+
+    const offsetDelta = replacement.original.length - translatedLength;
+    snapshot.replacements.splice(replacementIndex, 1);
+    for (const remaining of snapshot.replacements) {
+      if (remaining.start > replacement.start) {
+        remaining.start += offsetDelta;
+        remaining.end += offsetDelta;
+      }
+    }
+    snapshot.expected = node.data;
+
+    if (snapshot.replacements.length === 0) {
+      this.snapshots.delete(node);
+    }
+    this.restored = this.snapshots.size === 0;
+    return "restored";
+  }
 
   restore(): boolean {
     if (this.restored) {
@@ -56,7 +120,7 @@ export class TranslationSession {
 
     for (const [node, snapshot] of this.snapshots) {
       // Do not overwrite text that the page changed after translation (common in SPAs).
-      if (node.data === snapshot.translated) {
+      if (node.isConnected && node.data === snapshot.expected) {
         node.data = snapshot.original;
         this.snapshots.delete(node);
       }
@@ -98,17 +162,17 @@ export function applyTranslations(
     }
   }
 
-  try {
-    const byNode = new Map<
-      Text,
-      Array<(typeof replacements)[number]>
-    >();
-    for (const replacement of replacements) {
-      const group = byNode.get(replacement.candidate.node) ?? [];
-      group.push(replacement);
-      byNode.set(replacement.candidate.node, group);
-    }
+  const byNode = new Map<
+    Text,
+    Array<(typeof replacements)[number]>
+  >();
+  for (const replacement of replacements) {
+    const group = byNode.get(replacement.candidate.node) ?? [];
+    group.push(replacement);
+    byNode.set(replacement.candidate.node, group);
+  }
 
+  try {
     for (const group of byNode.values()) {
       group.sort((left, right) => right.candidate.start - left.candidate.start);
       for (const { candidate, english } of group) {
@@ -126,12 +190,28 @@ export function applyTranslations(
     throw error;
   }
 
-  const snapshots = new Map<
-    Text,
-    { original: string; translated: string }
-  >();
+  const snapshots = new Map<Text, NodeSnapshot>();
   for (const [node, original] of originals) {
-    snapshots.set(node, { original, translated: node.data });
+    const group = byNode.get(node) ?? [];
+    let offsetDelta = 0;
+    const activeReplacements = [...group]
+      .sort((left, right) => left.candidate.start - right.candidate.start)
+      .map(({ candidate, english }) => {
+        const start = candidate.start + offsetDelta;
+        const end = start + english.length;
+        offsetDelta +=
+          english.length - (candidate.end - candidate.start);
+        return {
+          original: candidate.text,
+          start,
+          end,
+        };
+      });
+    snapshots.set(node, {
+      original,
+      expected: node.data,
+      replacements: activeReplacements,
+    });
   }
   return new TranslationSession(snapshots);
 }
